@@ -1,6 +1,6 @@
 import { Directory, File, FileMode, Paths } from 'expo-file-system';
 
-import { cleanName, safeName, uniqueName, type SharedFile } from '@/share/http';
+import { nameWithType, safeName, textFileName, uniqueName, type SharedFile } from '@/share/http';
 
 function shareDir(): Directory {
   const dir = new Directory(Paths.document, 'share');
@@ -44,20 +44,52 @@ function tempFile(): File {
   return new File(shareDir(), `.up-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 }
 
+function mimeOf(source: File): string {
+  try {
+    return source.type ?? '';
+  } catch {
+    return '';
+  }
+}
+
 export async function importLocal(source: File): Promise<SharedFile> {
   if (!hasRoom(source.size)) throw new Error('空间不足');
   const dir = shareDir();
-  const temp = tempFile();
+  const mime = mimeOf(source);
+  // Copy into an empty folder first. The system names that copy with the real display name,
+  // which is where the suffix lives. The content URI's own last segment usually has none.
+  const staging = new Directory(Paths.cache, `.pick-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  staging.create();
   try {
-    await source.copy(temp);
-    const name = uniqueName(cleanName(source.name), (candidate) => new File(dir, candidate).exists);
-    temp.rename(name);
-    return describe(new File(dir, name));
+    await source.copy(staging);
+    const picked = staging.list().find(isFile);
+    if (!picked) throw new Error('没读到文件名');
+    const name = uniqueName(nameWithType(picked.name, mime), (candidate) => new File(dir, candidate).exists);
+    const dest = new File(dir, name);
+    await picked.move(dest);
+    return describe(dest);
   } catch (error) {
-    if (temp.exists) temp.delete();
     if (error instanceof Error && /space|full|enospc/i.test(error.message)) throw new Error('空间不足');
     throw error;
+  } finally {
+    try {
+      if (staging.exists) staging.delete();
+    } catch {
+      // The file was already moved into the share folder.
+    }
   }
+}
+
+export function saveText(text: string): SharedFile {
+  const body = text.replace(/\r\n/g, '\n');
+  if (!body.trim()) throw new Error('文本是空的');
+  const bytes = new TextEncoder().encode(body);
+  if (!hasRoom(bytes.byteLength)) throw new Error('空间不足');
+  const dir = shareDir();
+  const name = uniqueName(textFileName(body), (candidate) => new File(dir, candidate).exists);
+  const file = new File(dir, name);
+  file.write(body);
+  return describe(file);
 }
 
 export type Upload = {

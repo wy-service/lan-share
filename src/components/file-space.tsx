@@ -1,3 +1,4 @@
+import * as Clipboard from 'expo-clipboard';
 import { File } from 'expo-file-system';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
@@ -12,10 +13,14 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Fonts } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
 import { errorText, type SharedFile } from '@/share/http';
 import type { SpaceApi } from '@/share/space';
+
+function nameParts(name: string): { stem: string; ext: string } {
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0) return { stem: name, ext: '' };
+  return { stem: name.slice(0, dot), ext: name.slice(dot) };
+}
 
 function formatSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '';
@@ -39,7 +44,6 @@ export function FileSpace({
   title: string;
   header?: ReactNode;
 }) {
-  const theme = useTheme();
   const insets = useSafeAreaInsets();
   const [files, setFiles] = useState<SharedFile[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +51,8 @@ export function FileSpace({
   const [refreshing, setRefreshing] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const [text, setText] = useState('');
+  const [status, setStatus] = useState<string | null>(null);
   const pending = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -72,6 +78,14 @@ export function FileSpace({
     };
   }, [refresh]);
 
+  async function openFile(name: string) {
+    try {
+      await api.open(name);
+    } catch (error) {
+      Alert.alert('没打开', errorText(error));
+    }
+  }
+
   async function run(task: () => Promise<void>) {
     if (busy) return;
     setBusy(true);
@@ -82,6 +96,7 @@ export function FileSpace({
     } catch (taskError) {
       Alert.alert('没完成', errorText(taskError));
     } finally {
+      setStatus(null);
       setBusy(false);
     }
   }
@@ -90,7 +105,40 @@ export function FileSpace({
     if (busy) return;
     const picked = await File.pickFileAsync({ multipleFiles: true });
     if (picked.canceled) return;
-    await run(() => api.add(picked.result));
+    const chosen = picked.result;
+    await run(async () => {
+      for (let i = 0; i < chosen.length; i++) {
+        setStatus(chosen.length > 1 ? `正在上传 ${i + 1}/${chosen.length}` : '正在上传');
+        await api.add([chosen[i]]);
+      }
+    });
+  }
+
+  async function pasteText() {
+    try {
+      const value = await Clipboard.getStringAsync();
+      if (!value) {
+        setError('剪贴板是空的');
+        return;
+      }
+      setText(value);
+      setError(null);
+    } catch {
+      setError('剪贴板读不了');
+    }
+  }
+
+  function shareText() {
+    if (!text.trim()) {
+      setError('文本是空的');
+      return;
+    }
+    const body = text;
+    void run(async () => {
+      setStatus('正在分享文本');
+      await api.addText(body);
+      setText('');
+    });
   }
 
   function askRename(name: string) {
@@ -148,71 +196,103 @@ export function FileSpace({
           <View>
             {header}
             <View style={styles.sectionHead}>
-              <Text style={[styles.sectionTitle, { color: theme.text }]}>{title}</Text>
-              <Text style={[styles.count, { color: theme.textSecondary }]}>{files.length}</Text>
+              <Text style={styles.sectionTitle}>{title}</Text>
+              <Text style={styles.count}>{files.length}</Text>
             </View>
-            <Text style={[styles.hint, { color: theme.textSecondary }]}>点按打开，长按改名或删除</Text>
-            {error ? <Text style={[styles.error, { color: theme.danger }]}>{error}</Text> : null}
+            <Text style={styles.label}>分享文本</Text>
+            <TextInput
+              value={text}
+              onChangeText={(value) => {
+                setText(value);
+                setError(null);
+              }}
+              multiline
+              placeholder="输入，或从剪贴板粘贴"
+              placeholderTextColor="#5E727A"
+              style={styles.textInput}
+            />
+            <View style={styles.textActions}>
+              <Pressable accessibilityRole="button" onPress={() => void pasteText()} disabled={busy}>
+                <Text style={styles.action}>粘贴</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" onPress={shareText} disabled={busy}>
+                <Text style={styles.actionSave}>分享</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.hint}>点文件名打开。另存后，文件管理器里就能看到。</Text>
+            {error ? <Text style={styles.error}>{error}</Text> : null}
           </View>
         }
         ListEmptyComponent={
-          <Text style={[styles.empty, { color: theme.textSecondary }]}>
+          <Text style={styles.empty}>
             还没有文件。上传之后，同一 Wi-Fi 里连进来的人可以一起改。
           </Text>
         }
-        renderItem={({ item }) => (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={item.name}
-            accessibilityHint="点按打开，长按改名或删除"
-            onPress={() => void run(() => api.open(item.name))}
-            onLongPress={() => {
-              Alert.alert(item.name, undefined, [
-                { text: '改名', onPress: () => askRename(item.name) },
-                { text: '删除', style: 'destructive', onPress: () => askDelete(item.name) },
-                { text: '取消', style: 'cancel' },
-              ]);
-            }}
-            style={({ pressed }) => [
-              styles.row,
-              { borderColor: theme.line, backgroundColor: pressed ? theme.backgroundSelected : 'transparent' },
-            ]}>
-            <Text numberOfLines={1} style={[styles.name, { color: theme.text }]}>
-              {item.name}
-            </Text>
-            <Text style={[styles.size, { color: theme.textSecondary }]}>{formatSize(item.size)}</Text>
-          </Pressable>
-        )}
+        renderItem={({ item }) => {
+          const parts = nameParts(item.name);
+          return (
+            <View style={styles.row}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={item.name}
+                onPress={() => void openFile(item.name)}
+                style={({ pressed }) => [styles.name, pressed && styles.rowPressed]}>
+                <View style={styles.nameLine}>
+                  <View style={styles.stemBox}>
+                    <Text numberOfLines={1} style={styles.stem}>
+                      {parts.stem}
+                    </Text>
+                  </View>
+                  {parts.ext ? <Text style={styles.ext}>{parts.ext}</Text> : null}
+                </View>
+                <Text style={styles.size}>{formatSize(item.size)}</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() =>
+                  void run(async () => {
+                    setStatus('正在另存');
+                    await api.save(item.name);
+                  })
+                }
+                hitSlop={8}>
+                <Text style={styles.action}>另存</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" onPress={() => askRename(item.name)} hitSlop={8}>
+                <Text style={styles.action}>改名</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" onPress={() => askDelete(item.name)} hitSlop={8}>
+                <Text style={styles.actionDanger}>删除</Text>
+              </Pressable>
+            </View>
+          );
+        }}
       />
 
-      <View
-        style={[
-          styles.bar,
-          { borderColor: theme.line, backgroundColor: theme.background, paddingBottom: Math.max(insets.bottom, 12) },
-        ]}>
+      <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+        {status ? <Text style={styles.uploadStatus}>{status}</Text> : null}
+        <View style={styles.barRow}>
         <Pressable
           accessibilityRole="button"
           disabled={busy}
           onPress={() => void upload()}
-          style={({ pressed }) => [
-            styles.primary,
-            { backgroundColor: theme.plate, opacity: busy ? 0.5 : pressed ? 0.85 : 1 },
-          ]}>
-          <Text style={[styles.primaryText, { color: theme.plateText }]}>{busy ? '处理中' : '上传文件'}</Text>
+          style={({ pressed }) => [styles.primary, (busy || pressed) && styles.pressed, busy && styles.disabled]}>
+          <Text style={styles.primaryText}>上传文件</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
           disabled={busy || files.length === 0}
           onPress={askClear}
           style={({ pressed }) => [styles.secondary, { opacity: busy || files.length === 0 ? 0.4 : pressed ? 0.6 : 1 }]}>
-          <Text style={[styles.secondaryText, { color: theme.danger }]}>清空</Text>
+          <Text style={styles.secondaryText}>清空</Text>
         </Pressable>
+        </View>
       </View>
 
       <Modal transparent visible={renaming !== null} animationType="fade" onRequestClose={() => setRenaming(null)}>
         <Pressable style={styles.backdrop} onPress={() => setRenaming(null)}>
-          <Pressable style={[styles.dialog, { backgroundColor: theme.backgroundElement }]} onPress={() => {}}>
-            <Text style={[styles.dialogTitle, { color: theme.text }]}>改名</Text>
+          <Pressable style={styles.dialog} onPress={() => {}}>
+            <Text style={styles.dialogTitle}>改名</Text>
             <TextInput
               value={draft}
               onChangeText={setDraft}
@@ -220,16 +300,16 @@ export function FileSpace({
               selectTextOnFocus
               autoCapitalize="none"
               autoCorrect={false}
-              placeholderTextColor={theme.textSecondary}
-              style={[styles.input, { color: theme.text, borderColor: theme.line, backgroundColor: theme.background }]}
+              placeholderTextColor="#5E727A"
+              style={styles.input}
               onSubmitEditing={saveName}
             />
             <View style={styles.dialogActions}>
               <Pressable accessibilityRole="button" onPress={() => setRenaming(null)}>
-                <Text style={[styles.dialogCancel, { color: theme.textSecondary }]}>取消</Text>
+                <Text style={styles.dialogCancel}>取消</Text>
               </Pressable>
               <Pressable accessibilityRole="button" onPress={saveName}>
-                <Text style={[styles.dialogSave, { color: theme.flag }]}>保存</Text>
+                <Text style={styles.dialogSave}>保存</Text>
               </Pressable>
             </View>
           </Pressable>
@@ -243,37 +323,73 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   list: { paddingHorizontal: 20, paddingBottom: 12, flexGrow: 1 },
   sectionHead: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginTop: 22 },
-  sectionTitle: { fontSize: 18, fontFamily: Fonts.rounded, fontWeight: '700' },
-  count: { fontFamily: Fonts.mono, fontSize: 13 },
-  hint: { marginTop: 4, marginBottom: 8, fontSize: 13 },
-  error: { marginBottom: 8, fontSize: 14, lineHeight: 20 },
-  empty: { marginTop: 28, fontSize: 15, lineHeight: 22 },
+  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#1C2B33' },
+  count: { fontSize: 13, color: '#5E727A' },
+  label: { marginTop: 22, fontSize: 16, fontWeight: '700', color: '#1C2B33' },
+  textInput: {
+    marginTop: 8,
+    minHeight: 96,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#1C2B33',
+    borderColor: '#C5D5DB',
+    backgroundColor: '#F7FBFC',
+    textAlignVertical: 'top',
+  },
+  textActions: { flexDirection: 'row', gap: 16, marginTop: 4 },
+  hint: { marginTop: 16, marginBottom: 8, fontSize: 13, color: '#5E727A' },
+  error: { marginBottom: 8, fontSize: 14, lineHeight: 20, color: '#9E2F2F' },
+  empty: { marginTop: 28, fontSize: 15, lineHeight: 22, color: '#5E727A' },
   row: {
     minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: '#C5D5DB',
   },
-  name: { flex: 1, fontSize: 16 },
-  size: { fontFamily: Fonts.mono, fontSize: 12 },
+  rowPressed: { backgroundColor: '#D5E4EA' },
+  name: { flex: 1, minWidth: 0 },
+  nameLine: { flexDirection: 'row', alignItems: 'center', minWidth: 0 },
+  stemBox: { flexShrink: 1, minWidth: 0 },
+  stem: { fontSize: 16, color: '#1C2B33' },
+  ext: { flexShrink: 0, fontSize: 16, color: '#1C2B33' },
+  size: { marginTop: 2, fontSize: 12, color: '#5E727A' },
+  action: { fontSize: 15, fontWeight: '700', color: '#17343C', paddingVertical: 8, paddingHorizontal: 4 },
+  actionSave: { fontSize: 15, fontWeight: '700', color: '#E24B38', paddingVertical: 8, paddingHorizontal: 4 },
+  actionDanger: { fontSize: 15, fontWeight: '700', color: '#9E2F2F', paddingVertical: 8, paddingHorizontal: 4 },
   bar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 16,
     paddingHorizontal: 20,
     paddingTop: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: '#C5D5DB',
+    backgroundColor: '#E4EEF1',
   },
-  primary: { flex: 1, borderRadius: 999, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
-  primaryText: { fontSize: 16, fontWeight: '700' },
+  uploadStatus: { marginBottom: 8, fontSize: 14, fontWeight: '700', color: '#17343C' },
+  barRow: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  primary: { flex: 1, borderRadius: 999, minHeight: 48, alignItems: 'center', justifyContent: 'center', backgroundColor: '#17343C' },
+  primaryText: { fontSize: 16, fontWeight: '700', color: '#F4FBFC' },
+  pressed: { opacity: 0.85 },
+  disabled: { opacity: 0.5 },
   secondary: { minHeight: 48, justifyContent: 'center', paddingHorizontal: 4 },
-  secondaryText: { fontSize: 16, fontWeight: '700' },
+  secondaryText: { fontSize: 16, fontWeight: '700', color: '#9E2F2F' },
   backdrop: { flex: 1, backgroundColor: 'rgba(16, 24, 28, 0.45)', justifyContent: 'center', padding: 24 },
-  dialog: { borderRadius: 18, padding: 18, gap: 14 },
-  dialogTitle: { fontSize: 18, fontWeight: '700' },
-  input: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16 },
+  dialog: { borderRadius: 18, padding: 18, gap: 14, backgroundColor: '#F7FBFC' },
+  dialogTitle: { fontSize: 18, fontWeight: '700', color: '#1C2B33' },
+  input: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#1C2B33',
+    borderColor: '#C5D5DB',
+    backgroundColor: '#E4EEF1',
+  },
   dialogActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 18 },
-  dialogCancel: { fontSize: 16 },
-  dialogSave: { fontSize: 16, fontWeight: '700' },
+  dialogCancel: { fontSize: 16, color: '#5E727A' },
+  dialogSave: { fontSize: 16, fontWeight: '700', color: '#E24B38' },
 });

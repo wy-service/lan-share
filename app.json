@@ -6,7 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "lanshare",
-    "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon",
       "infoPlist": {
@@ -25,11 +24,8 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.wycode.lan_share"
-    },
-    "web": {
-      "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "package": "com.wycode.lan_share",
+      "permissions": ["android.permission.REQUEST_INSTALL_PACKAGES"]
     },
     "plugins": [
       "expo-router",
@@ -42,7 +38,22 @@
         }
       ],
       "expo-sharing",
-      "with-react-native-tcp-socket"
+      "with-react-native-tcp-socket",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true,
+            "buildArchs": ["arm64-v8a"],
+            "useLegacyPackaging": true,
+            "enableBundleCompression": true,
+            "enableMinifyInReleaseBuilds": true,
+            "packagingOptions": {
+              "exclude": []
+            }
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

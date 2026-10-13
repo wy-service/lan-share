@@ -17,12 +17,55 @@ export function safeName(raw: string): string | null {
   return name;
 }
 
+const TYPE_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'audio/mpeg': 'mp3',
+  'text/plain': 'txt',
+  'application/msword': 'doc',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+};
+
 export function cleanName(raw: string): string {
-  const base = raw.split(/[/\\]/).pop() ?? '';
+  let text = raw.trim();
+  try {
+    text = decodeURIComponent(text);
+  } catch {
+    // Keep the original when the percent-encoding is not valid.
+  }
+  const base = text.split(/[/\\]/).pop() ?? '';
   const safe = safeName(base);
   if (safe) return safe;
   const stripped = base.replace(/[\\/\u0000-\u001f]/g, '').replace(/^\.+/, '').trim();
   return safeName(stripped) ?? `file-${Date.now()}`;
+}
+
+export function extensionForType(type: string): string {
+  const mime = type.split(';')[0]?.trim().toLowerCase() ?? '';
+  if (!mime || mime === 'application/octet-stream') return '';
+  const known = TYPE_EXT[mime];
+  if (known) return known;
+  const sub = mime.split('/')[1]?.split('+')[0] ?? '';
+  return /^[a-z0-9]{1,8}$/.test(sub) ? sub : '';
+}
+
+export function nameWithType(raw: string, type: string | null | undefined): string {
+  const name = cleanName(raw);
+  const dot = name.lastIndexOf('.');
+  if (dot > 0 && dot < name.length - 1) return name;
+  const ext = extensionForType(type ?? '');
+  return ext ? `${name}.${ext}` : name;
+}
+
+export function textFileName(text: string): string {
+  const line = text.split(/\r?\n/, 1)[0]?.trim().replace(/\s+/g, ' ') ?? '';
+  let stem = line.replace(/[\\/\u0000-\u001f]/g, '').replace(/^\.+/, '').trim();
+  stem = stem.replace(/\.txt$/i, '').slice(0, 40).trim();
+  const safe = safeName(`${stem || '文本'}.txt`);
+  return safe ?? '文本.txt';
 }
 
 export function uniqueName(name: string, taken: (name: string) => boolean): string {
@@ -37,20 +80,12 @@ export function uniqueName(name: string, taken: (name: string) => boolean): stri
   return `${stem} (${Date.now()})${ext}`;
 }
 
-export function normalizeAddress(input: string): string | null {
-  let text = input.trim();
-  text = text.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
-  const match = /^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/.exec(text);
-  if (!match) return null;
-  const parts = match[1].split('.').map((part) => Number(part));
-  if (parts.some((part) => part > 255)) return null;
-  const port = match[2] === undefined ? SHARE_PORT : Number(match[2]);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-  return `${match[1]}:${port}`;
-}
-
-export function encodeFilePath(name: string): string {
-  return `/files/${encodeURIComponent(name)}`;
+export function parsePort(input: string): number | null {
+  const text = input.trim();
+  if (!/^\d{1,5}$/.test(text)) return null;
+  const port = Number(text);
+  if (port < 1 || port > 65535) return null;
+  return port;
 }
 
 export type HeaderMessage = {
@@ -90,6 +125,11 @@ export function contentLength(headers: Record<string, string>): number | null {
   if (raw === undefined || !/^\d+$/.test(raw)) return null;
   const value = Number(raw);
   return Number.isSafeInteger(value) ? value : null;
+}
+
+export function isPagePath(target: string): boolean {
+  const path = (target.split('?')[0] ?? '').replace(/\/+$/, '') || '/';
+  return path === '/';
 }
 
 export function fileRoute(
@@ -144,17 +184,26 @@ export function selfCheck(): void {
   if (safeName('a/b') !== null) throw new Error('safeName slash');
   if (safeName('.secret') !== null) throw new Error('safeName dot');
   if (safeName(' 笔记.txt ') !== '笔记.txt') throw new Error('safeName trim');
+  if (cleanName('primary%3ADownload%2Ffoo.pdf') !== 'foo.pdf') throw new Error('cleanName document id');
+  if (cleanName('笔记.txt') !== '笔记.txt') throw new Error('cleanName plain');
+  if (cleanName('%2E%2E%2Fx.txt') !== 'x.txt') throw new Error('cleanName encoded traversal');
+  if (extensionForType('image/jpeg') !== 'jpg') throw new Error('jpeg ext');
+  if (extensionForType('application/pdf') !== 'pdf') throw new Error('pdf ext');
+  if (extensionForType('application/octet-stream') !== '') throw new Error('octet ext');
+  if (nameWithType('image%3A1', 'image/jpeg') !== 'image:1.jpg') throw new Error('name with type');
+  if (nameWithType('a.txt', 'text/plain') !== 'a.txt') throw new Error('keep ext');
+  if (textFileName('你好\n第二行') !== '你好.txt') throw new Error('text name');
+  if (textFileName('   ') !== '文本.txt') throw new Error('text blank');
+  if (textFileName('../秘密') !== '秘密.txt') throw new Error('text unsafe');
 
   const taken = new Set(['a.txt']);
   if (uniqueName('a.txt', (name) => taken.has(name)) !== 'a (1).txt') throw new Error('uniqueName');
   if (uniqueName('b.txt', (name) => taken.has(name)) !== 'b.txt') throw new Error('uniqueName free');
 
-  if (normalizeAddress('http://192.168.1.8:39217/files') !== '192.168.1.8:39217') {
-    throw new Error('normalize url');
-  }
-  if (normalizeAddress('10.0.0.2') !== `10.0.0.2:${SHARE_PORT}`) throw new Error('normalize default port');
-  if (normalizeAddress('999.0.0.1') !== null) throw new Error('normalize octet');
-  if (normalizeAddress('10.0.0.1:99999') !== null) throw new Error('normalize port');
+  if (parsePort(' 8080 ') !== 8080) throw new Error('parsePort');
+  if (parsePort('0') !== null || parsePort('65536') !== null) throw new Error('parsePort range');
+  if (!isPagePath('/') || !isPagePath('/?x=1')) throw new Error('page path');
+  if (isPagePath('/files')) throw new Error('files is not the page');
 
   const raw = encoder.encode('PUT /files/a%20b.txt HTTP/1.1\r\nContent-Length: 4\r\n\r\nabcd');
   const split = 11;

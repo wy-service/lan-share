@@ -1,61 +1,49 @@
+import { Directory, File } from 'expo-file-system';
+import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
-import { File, Paths, UploadType } from 'expo-file-system';
+import { Platform } from 'react-native';
 
-import {
-  cleanName,
-  encodeFilePath,
-  errorText,
-  type SharedFile,
-} from '@/share/http';
-import {
-  clearFiles,
-  deleteFile,
-  importLocal,
-  listFiles,
-  localFile,
-  renameFile,
-} from '@/share/store';
+import { type SharedFile } from '@/share/http';
+import { clearFiles, deleteFile, importLocal, listFiles, localFile, renameFile, saveText } from '@/share/store';
 
 export type SpaceApi = {
   list: () => Promise<SharedFile[]>;
   add: (files: File[]) => Promise<void>;
+  addText: (text: string) => Promise<void>;
   rename: (from: string, to: string) => Promise<void>;
   remove: (name: string) => Promise<void>;
   clear: () => Promise<void>;
   open: (name: string) => Promise<void>;
+  save: (name: string) => Promise<void>;
 };
 
+const GRANT_READ = 1;
+
+function openType(file: File): string {
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  if (ext === 'apk') return 'application/vnd.android.package-archive';
+  return file.type || '*/*';
+}
+
+function pickedCancel(error: unknown): boolean {
+  return error instanceof Error && /cancell?ed/i.test(error.message);
+}
+
 async function present(file: File) {
+  if (Platform.OS === 'android') {
+    try {
+      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+        data: file.contentUri,
+        type: openType(file),
+        flags: GRANT_READ,
+      });
+    } catch {
+      throw new Error('没有应用能打开。点「另存」，存到下载或其他文件夹后再打开');
+    }
+    return;
+  }
   if (!(await Sharing.isAvailableAsync())) throw new Error('这台手机不能打开文件');
   await Sharing.shareAsync(file.uri);
-}
-
-async function readError(response: Response): Promise<never> {
-  let message = `请求失败 (${response.status})`;
-  try {
-    const data = JSON.parse(await response.text()) as { error?: string };
-    if (data.error) message = data.error;
-  } catch {
-    // Keep the status line when the body is not JSON.
-  }
-  throw new Error(message);
-}
-
-function parseList(body: string): SharedFile[] {
-  const value: unknown = JSON.parse(body);
-  if (!Array.isArray(value)) throw new Error('分享列表读不了');
-  return value.flatMap((item) => {
-    if (!item || typeof item !== 'object') return [];
-    const record = item as { name?: unknown; size?: unknown; modified?: unknown };
-    if (typeof record.name !== 'string' || typeof record.size !== 'number') return [];
-    return [
-      {
-        name: record.name,
-        size: record.size,
-        modified: typeof record.modified === 'number' ? record.modified : 0,
-      },
-    ];
-  });
 }
 
 export function localSpace(): SpaceApi {
@@ -65,6 +53,9 @@ export function localSpace(): SpaceApi {
     },
     async add(files) {
       for (const file of files) await importLocal(file);
+    },
+    async addText(text) {
+      saveText(text);
     },
     async rename(from, to) {
       renameFile(from, to);
@@ -80,56 +71,24 @@ export function localSpace(): SpaceApi {
       if (!file) throw new Error('文件不存在');
       await present(file);
     },
-  };
-}
-
-export function remoteSpace(address: string): SpaceApi {
-  const root = `http://${address}`;
-  return {
-    async list() {
-      const response = await fetch(`${root}/files`, { signal: AbortSignal.timeout(8000) });
-      if (!response.ok) await readError(response);
-      return parseList(await response.text());
-    },
-    async add(files) {
-      for (const file of files) {
-        const result = await file.upload(`${root}${encodeFilePath(cleanName(file.name))}`, {
-          httpMethod: 'PUT',
-          uploadType: UploadType.BINARY_CONTENT,
-        });
-        if (result.status < 200 || result.status >= 300) {
-          let message = `上传失败 (${result.status})`;
-          try {
-            const data = JSON.parse(result.body) as { error?: string };
-            if (data.error) message = data.error;
-          } catch {
-            message = errorText(new Error(message));
-          }
-          throw new Error(message);
-        }
+    async save(name) {
+      const file = localFile(name);
+      if (!file) throw new Error('文件不存在');
+      let directory: Directory;
+      try {
+        directory = await Directory.pickDirectoryAsync();
+      } catch (error) {
+        if (pickedCancel(error)) return;
+        throw error;
       }
-    },
-    async rename(from, to) {
-      const response = await fetch(`${root}${encodeFilePath(from)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-        body: to,
-      });
-      if (!response.ok) await readError(response);
-    },
-    async remove(name) {
-      const response = await fetch(`${root}${encodeFilePath(name)}`, { method: 'DELETE' });
-      if (!response.ok) await readError(response);
-    },
-    async clear() {
-      const response = await fetch(`${root}/files`, { method: 'DELETE' });
-      if (!response.ok) await readError(response);
-    },
-    async open(name) {
-      const dest = new File(Paths.cache, name);
-      if (dest.exists) dest.delete();
-      const file = await File.downloadFileAsync(`${root}${encodeFilePath(name)}`, dest);
-      await present(file);
+      try {
+        await file.copy(directory);
+      } catch (error) {
+        if (error instanceof Error && /already exists/i.test(error.message)) {
+          throw new Error('这个文件夹里已经有同名文件');
+        }
+        throw error;
+      }
     },
   };
 }

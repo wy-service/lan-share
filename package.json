@@ -4,22 +4,23 @@
   "version": "1.0.0",
   "dependencies": {
     "expo": "~57.0.28",
+    "expo-build-properties": "~57.0.22",
     "expo-clipboard": "~57.0.2",
     "expo-constants": "~57.0.21",
+    "expo-dev-client": "~57.0.20",
     "expo-file-system": "~57.0.7",
+    "expo-intent-launcher": "~57.0.1",
     "expo-linking": "~57.0.12",
     "expo-network": "~57.0.2",
     "expo-router": "~57.0.26",
     "expo-sharing": "~57.0.23",
     "expo-splash-screen": "~57.0.10",
     "react": "19.2.3",
-    "react-dom": "19.2.3",
     "react-native": "0.86.3",
     "react-native-gesture-handler": "~2.32.0",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
     "react-native-tcp-socket": "^6.4.3",
-    "react-native-web": "~0.21.0",
     "with-react-native-tcp-socket": "^1.1.0"
   },
   "devDependencies": {
@@ -32,7 +33,6 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web",
     "lint": "expo lint"
   },
   "private": true

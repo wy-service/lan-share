@@ -3,10 +3,10 @@ import type Socket from 'react-native-tcp-socket/lib/types/Socket';
 import { FileMode } from 'expo-file-system';
 
 import {
-  SHARE_PORT,
   contentLength,
   errorText,
   fileRoute,
+  isPagePath,
   headerEnd,
   httpResponse,
   jsonBytes,
@@ -23,6 +23,7 @@ import {
   renameFile,
   type Upload,
 } from '@/share/store';
+import { pageBytes } from '@/share/page';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 
@@ -52,9 +53,9 @@ function drained(socket: Socket): Promise<void> {
 }
 
 // ponytail: Connection: close, one request per socket. Add keep-alive if clients pipeline.
-async function sendFile(socket: Socket, file: NonNullable<ReturnType<typeof localFile>>) {
+async function sendFile(socket: Socket, file: NonNullable<ReturnType<typeof localFile>>, name: string) {
   const size = file.size;
-  const head = `HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ${size}\r\nConnection: close\r\n\r\n`;
+  const head = `HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ${size}\r\nContent-Disposition: attachment; filename*=UTF-8''${encodeURIComponent(name)}\r\nConnection: close\r\n\r\n`;
   if (!socket.write(head)) await drained(socket);
   const handle = file.open(FileMode.ReadOnly);
   try {
@@ -127,6 +128,13 @@ function accept(socket: Socket) {
   };
 
   const openRequest = (head: HeaderMessage, rest: Uint8Array) => {
+    if (head.method === 'GET' && isPagePath(head.target)) {
+      if (finished) return;
+      finished = true;
+      phase = { stage: 'done' };
+      socket.end(httpResponse(200, pageBytes, 'text/html; charset=utf-8'));
+      return;
+    }
     const route = fileRoute(head.target);
     if (!route) {
       fail(404, '没有这个文件');
@@ -151,7 +159,7 @@ function accept(socket: Socket) {
       }
       phase = { stage: 'done' };
       finished = true;
-      void sendFile(socket, file).catch(() => socket.destroy());
+      void sendFile(socket, file, route.name).catch(() => socket.destroy());
       return;
     }
 
@@ -313,7 +321,7 @@ function accept(socket: Socket) {
   });
 }
 
-export function startShareServer(): Promise<{ stop: () => void }> {
+export function startShareServer(port: number): Promise<{ stop: () => void }> {
   return new Promise((resolve, reject) => {
     const server = TcpSocket.createServer((socket) => {
       accept(socket);
@@ -324,7 +332,7 @@ export function startShareServer(): Promise<{ stop: () => void }> {
       settled = true;
       reject(error);
     });
-    server.listen({ port: SHARE_PORT, host: '0.0.0.0', reuseAddress: true }, () => {
+    server.listen({ port, host: '0.0.0.0', reuseAddress: true }, () => {
       if (settled) return;
       settled = true;
       resolve({
